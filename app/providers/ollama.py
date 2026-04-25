@@ -14,7 +14,16 @@ from .base import BaseProvider
 
 logger = logging.getLogger(__name__)
 
-_PREFIX = "ollama/"
+_PREFIX = "ollama-"
+
+
+def _safe_model_id(name: str) -> str:
+    """Convert Ollama model name to a URL-safe proxy ID.
+
+    e.g. llama3.2:latest → ollama-llama3.2-latest
+    Avoids '/' (path separator) and ':' (port separator) in IDs.
+    """
+    return f"{_PREFIX}{name.replace('/', '-').replace(':', '-')}"
 
 
 def _to_openai_messages(body: dict) -> list[dict]:
@@ -32,9 +41,9 @@ def _to_openai_messages(body: dict) -> list[dict]:
     return messages
 
 
-def _to_openai_body(body: dict, stream: bool = False) -> dict:
+def _to_openai_body(body: dict, ollama_name: str, stream: bool = False) -> dict:
     result: dict = {
-        "model": body["model"].removeprefix(_PREFIX),
+        "model": ollama_name,
         "messages": _to_openai_messages(body),
         "stream": stream,
     }
@@ -72,6 +81,10 @@ def _sse(event: str, data: dict) -> bytes:
 
 
 class OllamaProvider(BaseProvider):
+    def __init__(self) -> None:
+        # Maps safe proxy ID → original Ollama model name
+        self._id_to_name: dict[str, str] = {}
+
     @property
     def name(self) -> str:
         return "Ollama"
@@ -83,20 +96,26 @@ class OllamaProvider(BaseProvider):
     def can_handle(self, model_id: str) -> bool:
         return model_id.lower().startswith(_PREFIX)
 
+    def _resolve_name(self, model_id: str) -> str:
+        """Return original Ollama model name for a safe proxy ID."""
+        return self._id_to_name.get(model_id, model_id.removeprefix(_PREFIX))
+
     async def list_models(self) -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{settings.ollama_base_url}/api/tags")
                 resp.raise_for_status()
-                return [
-                    {
-                        "id": f"{_PREFIX}{m['name']}",
+                models = []
+                for m in resp.json().get("models", []):
+                    safe_id = _safe_model_id(m["name"])
+                    self._id_to_name[safe_id] = m["name"]
+                    models.append({
+                        "id": safe_id,
                         "owned_by": "ollama",
                         "provider": "ollama",
                         "display_name": m["name"],
-                    }
-                    for m in resp.json().get("models", [])
-                ]
+                    })
+                return models
         except Exception as exc:
             logger.warning("[Ollama] list_models failed: %s", exc)
             return []
@@ -105,8 +124,9 @@ class OllamaProvider(BaseProvider):
         self, path: str, body: dict, headers: dict
     ) -> tuple[int, dict | None, str | None]:
         url = f"{settings.ollama_base_url}/v1/chat/completions"
+        ollama_name = self._resolve_name(body["model"])
         async with httpx.AsyncClient(timeout=self._timeout()) as client:
-            resp = await client.post(url, json=_to_openai_body(body))
+            resp = await client.post(url, json=_to_openai_body(body, ollama_name))
             if resp.status_code != 200:
                 return resp.status_code, resp.json(), None
             return 200, _to_anthropic_response(resp.json(), body["model"]), None
@@ -117,6 +137,7 @@ class OllamaProvider(BaseProvider):
         url = f"{settings.ollama_base_url}/v1/chat/completions"
         msg_id = f"msg_ollama_{int(time.time())}"
         model = body["model"]
+        ollama_name = self._resolve_name(model)
 
         yield _sse("message_start", {
             "type": "message_start",
@@ -134,7 +155,7 @@ class OllamaProvider(BaseProvider):
 
         output_tokens = 0
         async with httpx.AsyncClient(timeout=self._timeout()) as client:
-            async with client.stream("POST", url, json=_to_openai_body(body, stream=True)) as resp:
+            async with client.stream("POST", url, json=_to_openai_body(body, ollama_name, stream=True)) as resp:
                 async for line in resp.aiter_lines():
                     if not line.startswith("data: "):
                         continue
