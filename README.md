@@ -1,4 +1,4 @@
-# bmg-llm-proxy Wiki
+# cowork-llm-proxy Wiki
 
 一个轻量级的 Anthropic API 兼容代理，将 Claude SDK 的请求透明转发到 DeepSeek、阿里云 DashScope 等后端，无需修改客户端代码。
 
