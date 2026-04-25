@@ -1,0 +1,4 @@
+my.cowork.llm {
+    tls internal
+    reverse_proxy proxy:8000
+}
