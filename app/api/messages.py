@@ -18,6 +18,30 @@ def _err(status: int, type_: str, msg: str) -> JSONResponse:
     )
 
 
+@router.post("/messages/count_tokens")
+async def count_tokens(request: Request):
+    """Stub token counter — estimates ~4 chars per token."""
+    try:
+        body: dict = await request.json()
+    except Exception:
+        return _err(400, "invalid_request_error", "Request body must be valid JSON.")
+
+    total_chars = 0
+    system = body.get("system", "")
+    if isinstance(system, str):
+        total_chars += len(system)
+    elif isinstance(system, list):
+        total_chars += sum(len(b.get("text", "")) for b in system if b.get("type") == "text")
+    for msg in body.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            total_chars += sum(len(b.get("text", "")) for b in content if b.get("type") == "text")
+
+    return JSONResponse(content={"input_tokens": max(1, total_chars // 4)})
+
+
 @router.post("/messages")
 async def create_message(request: Request):
     try:
@@ -33,6 +57,7 @@ async def create_message(request: Request):
     try:
         provider = registry.route(model)
     except ValueError as exc:
+        logger.warning("No provider for model %r — %s", model, exc)
         return _err(404, "not_found_error", str(exc))
 
     client_headers = dict(request.headers)

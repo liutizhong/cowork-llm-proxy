@@ -145,8 +145,8 @@ class AnthropicCompatProvider(BaseProvider):
                     async for chunk in resp.aiter_bytes():
                         yield chunk
         except Exception as exc:
-            logger.error("[%s] forward_stream error: %s", self.name, exc)
-            err = _json.dumps({"type": "error", "error": {"type": "api_error", "message": str(exc)}})
+            logger.error("[%s] forward_stream error: %s %r", self.name, type(exc).__name__, exc)
+            err = _json.dumps({"type": "error", "error": {"type": "api_error", "message": f"{type(exc).__name__}: {exc}"}})
             yield f"event: error\ndata: {err}\n\n".encode()
 
     def _timeout(self) -> httpx.Timeout:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -40,9 +40,15 @@ class Settings(BaseSettings):
     ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
 
     # ── Model allowlist ───────────────────────────────────────────────────────
-    # Comma-separated. Empty = expose all models.
+    # Comma-separated string. Empty = expose all models.
     # Example: ALLOWED_MODELS=deepseek-v4-pro,glm-5
-    allowed_models: list[str] = Field(default=[], alias="ALLOWED_MODELS")
+    # Stored as str to avoid pydantic-settings v2 JSON-parsing CSV before validators run.
+    allowed_models_raw: str = Field(default="", alias="ALLOWED_MODELS")
+
+    @property
+    def allowed_models(self) -> list[str]:
+        v = self.allowed_models_raw.strip()
+        return [m.strip() for m in v.split(",") if m.strip()] if v else []
 
     # ── Server ────────────────────────────────────────────────────────────────
     host: str = Field(default="0.0.0.0", alias="HOST")
@@ -50,13 +56,6 @@ class Settings(BaseSettings):
     workers: int = Field(default=2, alias="WORKERS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     timeout: int = Field(default=300, alias="TIMEOUT")
-
-    @field_validator("allowed_models", mode="before")
-    @classmethod
-    def _parse_csv(cls, v: object) -> list[str]:
-        if isinstance(v, str):
-            return [m.strip() for m in v.split(",") if m.strip()]
-        return list(v) if v else []
 
 
 settings = Settings()
