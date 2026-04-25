@@ -69,4 +69,8 @@ def build_registry() -> ProviderRegistry:
     if settings.enable_dashscope and settings.dashscope_api_key:
         registry.register(DashScopeProvider())
 
+    if settings.enable_ollama:
+        from .ollama import OllamaProvider
+        registry.register(OllamaProvider())
+
     return registry

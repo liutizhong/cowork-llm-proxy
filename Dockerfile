@@ -3,8 +3,8 @@ FROM  bitnami/python:3.11
 WORKDIR /app
 
 COPY pyproject.toml .
-RUN env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
-    pip install  fastapi "uvicorn[standard]" httpx pydantic pydantic-settings
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ \
+    fastapi "uvicorn[standard]" httpx pydantic pydantic-settings
 
 COPY app ./app
 

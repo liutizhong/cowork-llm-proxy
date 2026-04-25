@@ -1,4 +1,4 @@
-# cowork-llm-proxy Wiki
+# bmg-llm-proxy Wiki
 
 一个轻量级的 Anthropic API 兼容代理，将 Claude SDK 的请求透明转发到 DeepSeek、阿里云 DashScope 等后端，无需修改客户端代码。
 
@@ -43,6 +43,7 @@ app/
     ├── anthropic_compat.py  # 通用 Anthropic 兼容实现（HTTP 纯代理）
     ├── deepseek.py      # DeepSeek 提供商
     ├── dashscope.py     # 阿里云 DashScope 提供商
+    ├── ollama.py        # 本地 Ollama 提供商（含格式转换层）
     └── registry.py      # ProviderRegistry：注册 + 路由
 ```
 
@@ -50,7 +51,9 @@ app/
 
 **ProviderRegistry** — 启动时构建，存在 `app.state.registry`。按注册顺序遍历提供商，第一个 `can_handle(model_id)` 返回 True 的提供商负责处理请求。
 
-**AnthropicCompatProvider** — 所有提供商的通用基类实现。不使用任何 SDK，直接用 `httpx` 做纯 HTTP 代理，保留原始请求体和 Anthropic 专属 Header（`anthropic-version`、`anthropic-beta`）。模型列表有 5 分钟内存缓存，避免频繁请求上游。
+**AnthropicCompatProvider** — DeepSeek / DashScope 的通用基类实现。不使用任何 SDK，直接用 `httpx` 做纯 HTTP 代理，保留原始请求体和 Anthropic 专属 Header（`anthropic-version`、`anthropic-beta`）。模型列表有 5 分钟内存缓存，避免频繁请求上游。
+
+**OllamaProvider** — 本地 Ollama 专用实现（继承 `BaseProvider`，不走 `AnthropicCompatProvider`）。因为 Ollama 暴露的是 OpenAI 兼容格式，该 Provider 内置双向格式转换：Anthropic Messages → OpenAI chat/completions（请求），OpenAI response / SSE → Anthropic response / SSE（响应）。无需 API Key，不依赖网络。
 
 **AuthMiddleware** — Starlette 中间件，对除 `/health` 和 `/` 之外的所有路径验证 API Key。接受两种格式：
 - `x-api-key: <key>`
@@ -82,6 +85,19 @@ app/
 | 默认模型列表 | `https://dashscope.aliyuncs.com/compatible-mode/v1/models` |
 | 内置 fallback 模型 | `glm-5`, `glm-5.1`, `glm-4.7`, `kimi-k2.5`, `minimax-m2.5` |
 | display_name 前缀 | `Aliyun - ` |
+
+### Ollama（本地）
+
+路由前缀：`ollama/`（例如 `ollama/llama3.2:latest`）
+
+| 项目 | 值 |
+|---|---|
+| 模型路由规则 | `model_id.lower().startswith("ollama/")` |
+| 默认端点 | `http://localhost:11434` |
+| Docker 内访问宿主机 | `http://host.docker.internal:11434` |
+| API Key | 不需要 |
+| 格式 | OpenAI-compat（内部自动转换） |
+| 模型列表来源 | `/api/tags`（动态，无缓存） |
 
 ---
 
@@ -147,6 +163,8 @@ cp .env.example .env
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/anthropic` | 可覆盖为私有化部署地址 |
 | `ENABLE_DASHSCOPE` | `false` | 启用阿里云 DashScope |
 | `DASHSCOPE_API_KEY` | — | DashScope Key |
+| `ENABLE_OLLAMA` | `false` | 启用本地 Ollama |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama 地址（Docker 内用 `host.docker.internal`） |
 | `ALLOWED_MODELS` | （空，暴露全部） | 逗号分隔的模型 ID 白名单 |
 | `WORKERS` | `2` | uvicorn worker 数量 |
 | `TIMEOUT` | `300` | 上游请求超时（秒） |

@@ -35,6 +35,10 @@ class Settings(BaseSettings):
         alias="DASHSCOPE_MODELS_URL",
     )
 
+    # ── Ollama (local) ────────────────────────────────────────────────────────
+    enable_ollama: bool = Field(default=False, alias="ENABLE_OLLAMA")
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+
     # ── Model allowlist ───────────────────────────────────────────────────────
     # Comma-separated. Empty = expose all models.
     # Example: ALLOWED_MODELS=deepseek-v4-pro,glm-5
