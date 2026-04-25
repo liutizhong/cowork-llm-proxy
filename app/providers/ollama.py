@@ -133,11 +133,65 @@ class OllamaProvider(BaseProvider):
         url = f"{settings.ollama_base_url}/v1/chat/completions"
         model = body["model"]
         ollama_name = self._id_to_name.get(model, model.removeprefix(_PREFIX))
-        async with httpx.AsyncClient(timeout=self._timeout()) as client:
-            resp = await client.post(url, json=_to_openai_body(body, ollama_name))
-            if resp.status_code != 200:
-                return resp.status_code, resp.json(), None
-            return 200, _to_anthropic_response(resp.json(), body["model"]), None
+        # Always request streaming from Ollama to avoid blocking the server
+        # while waiting for a full non-streaming response from a large model.
+        # Collect tokens here and assemble the complete response ourselves.
+        full_text = ""
+        usage: dict = {}
+        finish_reason = "stop"
+        msg_id = f"msg_ollama_{int(time.time())}"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout()) as client:
+                async with client.stream(
+                    "POST", url, json=_to_openai_body(body, ollama_name, stream=True)
+                ) as resp:
+                    if resp.status_code != 200:
+                        err = await resp.aread()
+                        try:
+                            return resp.status_code, json.loads(err), None
+                        except Exception:
+                            return resp.status_code, {"error": err.decode()}, None
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                            delta = chunk["choices"][0].get("delta", {})
+                            full_text += delta.get("content") or ""
+                            if chunk["choices"][0].get("finish_reason"):
+                                finish_reason = chunk["choices"][0]["finish_reason"]
+                            if chunk.get("usage"):
+                                usage = chunk["usage"]
+                        except Exception:
+                            continue
+        except httpx.ReadTimeout:
+            logger.error("[Ollama] ReadTimeout for model %s — Ollama may be overloaded", ollama_name)
+            return 503, {
+                "type": "error",
+                "error": {"type": "overloaded_error", "message": "Ollama timed out. The model may be busy or loading."},
+            }, None
+        except Exception as exc:
+            logger.error("[Ollama] forward failed: %s", exc)
+            return 503, {
+                "type": "error",
+                "error": {"type": "api_error", "message": f"Ollama connection error: {exc}"},
+            }, None
+        return 200, {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "model": model,
+            "content": [{"type": "text", "text": full_text}],
+            "stop_reason": "end_turn" if finish_reason == "stop" else "max_tokens",
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
+        }, None
 
     async def forward_stream(
         self, path: str, body: dict, headers: dict
