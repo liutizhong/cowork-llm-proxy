@@ -21,7 +21,13 @@ async def list_models(request: Request):
 
     first_id = models[0]["id"] if models else None
     last_id = models[-1]["id"] if models else None
-    return {"data": models, "has_more": False, "first_id": first_id, "last_id": last_id}
+    return {
+        "object": "list",
+        "data": models,
+        "has_more": False,
+        "first_id": first_id,
+        "last_id": last_id,
+    }
 
 
 @router.get("/models/{model_id:path}")

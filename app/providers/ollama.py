@@ -20,10 +20,12 @@ _PREFIX = "ollama-"
 def _safe_model_id(name: str) -> str:
     """Convert Ollama model name to a URL-safe proxy ID.
 
-    e.g. llama3.2:latest → ollama-llama3.2-latest
-    Avoids '/' (path separator) and ':' (port separator) in IDs.
+    e.g. llama3.2:latest → ollama-llama3-2-latest
+    Replaces '/', ':', and '.' with '-' to avoid URL parsing issues.
+    The original name is preserved in OllamaProvider._id_to_name for routing.
     """
-    return f"{_PREFIX}{name.replace('/', '-').replace(':', '-')}"
+    safe = name.replace("/", "-").replace(":", "-").replace(".", "-")
+    return f"{_PREFIX}{safe}"
 
 
 def _to_openai_messages(body: dict) -> list[dict]:
@@ -96,8 +98,13 @@ class OllamaProvider(BaseProvider):
     def can_handle(self, model_id: str) -> bool:
         return model_id.lower().startswith(_PREFIX)
 
-    def _resolve_name(self, model_id: str) -> str:
-        """Return original Ollama model name for a safe proxy ID."""
+    async def _resolve_name(self, model_id: str) -> str:
+        """Return original Ollama model name for a safe proxy ID.
+
+        Refreshes the id→name map from Ollama if the model isn't cached yet.
+        """
+        if model_id not in self._id_to_name:
+            await self.list_models()
         return self._id_to_name.get(model_id, model_id.removeprefix(_PREFIX))
 
     async def list_models(self) -> list[dict]:
@@ -124,7 +131,8 @@ class OllamaProvider(BaseProvider):
         self, path: str, body: dict, headers: dict
     ) -> tuple[int, dict | None, str | None]:
         url = f"{settings.ollama_base_url}/v1/chat/completions"
-        ollama_name = self._resolve_name(body["model"])
+        model = body["model"]
+        ollama_name = self._id_to_name.get(model, model.removeprefix(_PREFIX))
         async with httpx.AsyncClient(timeout=self._timeout()) as client:
             resp = await client.post(url, json=_to_openai_body(body, ollama_name))
             if resp.status_code != 200:
@@ -137,42 +145,67 @@ class OllamaProvider(BaseProvider):
         url = f"{settings.ollama_base_url}/v1/chat/completions"
         msg_id = f"msg_ollama_{int(time.time())}"
         model = body["model"]
-        ollama_name = self._resolve_name(model)
 
-        yield _sse("message_start", {
-            "type": "message_start",
-            "message": {
-                "id": msg_id, "type": "message", "role": "assistant",
-                "content": [], "model": model, "stop_reason": None,
-                "usage": {"input_tokens": 0, "output_tokens": 0},
-            },
-        })
-        yield _sse("content_block_start", {
-            "type": "content_block_start", "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        })
-        yield _sse("ping", {"type": "ping"})
+        # Resolve the name outside the generator body to avoid nested async HTTP
+        # calls inside an async generator, which can interfere with httpx's
+        # connection pool and trigger unexpected TLS upgrade attempts.
+        ollama_name = self._id_to_name.get(model, model.removeprefix(_PREFIX))
 
         output_tokens = 0
-        async with httpx.AsyncClient(timeout=self._timeout()) as client:
-            async with client.stream("POST", url, json=_to_openai_body(body, ollama_name, stream=True)) as resp:
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    payload = line[6:].strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(payload)
-                        text = chunk["choices"][0].get("delta", {}).get("content") or ""
-                        if text:
-                            output_tokens += 1
-                            yield _sse("content_block_delta", {
-                                "type": "content_block_delta", "index": 0,
-                                "delta": {"type": "text_delta", "text": text},
-                            })
-                    except Exception:
-                        continue
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout()) as client:
+                async with client.stream(
+                    "POST", url, json=_to_openai_body(body, ollama_name, stream=True)
+                ) as resp:
+                    if resp.status_code != 200:
+                        err_text = await resp.aread()
+                        logger.error("[Ollama] stream error %s: %s", resp.status_code, err_text)
+                        yield _sse("error", {
+                            "type": "error",
+                            "error": {"type": "api_error", "message": f"Ollama returned {resp.status_code}"},
+                        })
+                        return
+
+                    # Only yield the opening events once we know Ollama accepted the request.
+                    yield _sse("message_start", {
+                        "type": "message_start",
+                        "message": {
+                            "id": msg_id, "type": "message", "role": "assistant",
+                            "content": [], "model": model, "stop_reason": None,
+                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                        },
+                    })
+                    yield _sse("content_block_start", {
+                        "type": "content_block_start", "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    })
+                    yield _sse("ping", {"type": "ping"})
+
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:].strip()
+                        if payload == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(payload)
+                            text = chunk["choices"][0].get("delta", {}).get("content") or ""
+                            if text:
+                                output_tokens += 1
+                                yield _sse("content_block_delta", {
+                                    "type": "content_block_delta", "index": 0,
+                                    "delta": {"type": "text_delta", "text": text},
+                                })
+                        except Exception:
+                            continue
+
+        except Exception as exc:
+            logger.error("[Ollama] forward_stream failed: %s", exc)
+            yield _sse("error", {
+                "type": "error",
+                "error": {"type": "api_error", "message": f"Ollama connection failed: {exc}"},
+            })
+            return
 
         yield _sse("content_block_stop", {"type": "content_block_stop", "index": 0})
         yield _sse("message_delta", {
@@ -183,4 +216,4 @@ class OllamaProvider(BaseProvider):
         yield _sse("message_stop", {"type": "message_stop"})
 
     def _timeout(self) -> httpx.Timeout:
-        return httpx.Timeout(settings.timeout, connect=10)
+        return httpx.Timeout(settings.timeout, connect=30)
