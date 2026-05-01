@@ -68,7 +68,10 @@ class AnthropicCompatProvider(BaseProvider):
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
                     self._models_url,
-                    headers={"Authorization": f"Bearer {self._api_key}"},
+                    headers={
+                        "x-api-key": self._api_key,
+                        "Authorization": f"Bearer {self._api_key}",
+                    },
                 )
                 resp.raise_for_status()
                 data = resp.json().get("data", [])
@@ -91,12 +94,17 @@ class AnthropicCompatProvider(BaseProvider):
     # ── Request forwarding ────────────────────────────────────────────────────
 
     def _upstream_headers(self, client_headers: dict) -> dict:
-        """Build headers for the upstream request."""
+        """Build headers for the upstream request.
+
+        Sends both x-api-key (Anthropic format) and Authorization: Bearer
+        (OpenAI format) so the proxy works with providers that follow either
+        convention on their Anthropic-compatible endpoints.
+        """
         forwarded = {
+            "x-api-key": self._api_key,
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
         }
-        # Forward Anthropic-specific headers the client sent
         for key in ("anthropic-version", "anthropic-beta"):
             if key in client_headers:
                 forwarded[key] = client_headers[key]
@@ -110,20 +118,36 @@ class AnthropicCompatProvider(BaseProvider):
         self, path: str, body: dict, headers: dict
     ) -> tuple[int, dict | None, str | None]:
         url = self._upstream_url(path)
-        async with httpx.AsyncClient(timeout=self._timeout()) as client:
-            resp = await client.post(url, json=body, headers=self._upstream_headers(headers))
-            return resp.status_code, resp.json(), None
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout()) as client:
+                resp = await client.post(url, json=body, headers=self._upstream_headers(headers))
+                return resp.status_code, resp.json(), None
+        except httpx.ConnectTimeout:
+            logger.error("[%s] ConnectTimeout → %s", self.name, url)
+            return 503, {"type": "error", "error": {"type": "overloaded_error", "message": f"{self.name} connection timed out."}}, None
+        except httpx.ReadTimeout:
+            logger.error("[%s] ReadTimeout → %s", self.name, url)
+            return 503, {"type": "error", "error": {"type": "overloaded_error", "message": f"{self.name} read timed out."}}, None
+        except Exception as exc:
+            logger.error("[%s] forward error: %s", self.name, exc)
+            return 503, {"type": "error", "error": {"type": "api_error", "message": str(exc)}}, None
 
     async def forward_stream(
         self, path: str, body: dict, headers: dict
     ) -> AsyncGenerator[bytes, None]:
+        import json as _json
         url = self._upstream_url(path)
-        async with httpx.AsyncClient(timeout=self._timeout()) as client:
-            async with client.stream(
-                "POST", url, json=body, headers=self._upstream_headers(headers)
-            ) as resp:
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout()) as client:
+                async with client.stream(
+                    "POST", url, json=body, headers=self._upstream_headers(headers)
+                ) as resp:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+        except Exception as exc:
+            logger.error("[%s] forward_stream error: %s %r", self.name, type(exc).__name__, exc)
+            err = _json.dumps({"type": "error", "error": {"type": "api_error", "message": f"{type(exc).__name__}: {exc}"}})
+            yield f"event: error\ndata: {err}\n\n".encode()
 
     def _timeout(self) -> httpx.Timeout:
         from ..config import settings

@@ -31,6 +31,11 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Providers: %s", ", ".join(provider_names))
 
+    # Warm up all provider model caches at startup so that Ollama's _id_to_name
+    # map is populated before the first request arrives.
+    await registry.list_all_models()
+    logger.info("Model caches warmed up.")
+
     yield
     logger.info("Shutting down.")
 
